@@ -2,7 +2,7 @@ const ethers = require('ethers');
 
 const rpcUrl = "";
 async function checkAllowanceAndApprove(walletAddress, tokenAddress, spenderAddress, amount) {
-  const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
   
   const tokenABI = [
     "function allowance(address owner, address spender) view returns (uint256)",
@@ -18,6 +18,10 @@ async function checkAllowanceAndApprove(walletAddress, tokenAddress, spenderAddr
   } else {
     return false;
   }
+}
+
+module.exports = {
+  checkAllowanceAndApprove
 }
 
 async function main() {

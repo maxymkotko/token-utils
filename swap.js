@@ -1,53 +1,164 @@
-const { ChainId, Token, WETH, Fetcher, Route, Trade, TokenAmount, TradeType } = require('@uniswap/sdk');
+const {
+  AlphaRouter,
+  SwapType,
+} = require('@uniswap/smart-order-router');
+const { TradeType, CurrencyAmount, Percent, Token, ChainId } = require('@uniswap/sdk-core');
+
+const {
+  sendTransaction,
+} = require('./providers');
+
 const ethers = require('ethers');
+const JSBI = require('jsbi');
+const { checkAllowanceAndApprove } = require('./verify-allowance');
 
-// const rpcUrl = "";
+const MAX_FEE_PER_GAS = 100000000000
+const MAX_PRIORITY_FEE_PER_GAS = 100000000000
 
-// async function executeTokenSwap(
-//   tokenInAddress,
-//   tokenOutAddress,
-//   amountIn,
-//   walletAddress
-// ) {
-//   const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+function getProvider(chainId) {
+  const rpcUrl = "";
+  switch(chainId) {
+      case ChainId.MAINNET:
+        rpcUrl = "";
+        break;
+      case ChainId.POLYGON:
+        rpcUrl = "";
+        break;
+      default: 
+        rpcUrl = "";
+        break;
+  }
+  return new ethers.JsonRpcProvider(rpcUrl);
+}
 
-//   const tokenIn = new Token(ChainId.MAINNET, tokenInAddress, 18);
-//   const tokenOut = new Token(ChainId.MAINNET, tokenOutAddress, 18);
+function getSwapRouterAddress(chainId) {
+  switch(chainId) {
+    case ChainId.MAINNET:
+      return "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
+    case ChainId.POLYGON:
+      return "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
+    case ChainId.BASE:
+      return "0x2626664c2603336E57B271c5C0b26F421741e481";
+    default:
+      return "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
+  }
+}
 
-//   // Fetch the pair
-//   const pair = await Fetcher.fetchPairData(tokenIn, tokenOut, provider);
+function fromReadableAmount(amount, decimals) {
+  const extraDigits = Math.pow(10, countDecimals(amount))
+  const adjustedAmount = amount * extraDigits
+  return JSBI.divide(
+    JSBI.multiply(
+      JSBI.BigInt(adjustedAmount),
+      JSBI.exponentiate(JSBI.BigInt(10), JSBI.BigInt(decimals))
+    ),
+    JSBI.BigInt(extraDigits)
+  )
+}
 
-//   // Create a route
-//   const route = new Route([pair], tokenIn);
+async function generateRoute(chainId, recipientAddress, tokenInAddress, tokenInDecimal, tokenOutAddress, tokenOutDecimal, amountIn) {
+  const tokenIn = new Token(chainId, tokenInAddress, tokenInDecimal);
+  const tokenOut = new Token(chainId, tokenOutAddress, tokenOutDecimal);
 
-//   // Create a trade
-//   const trade = new Trade(
-//     route,
-//     new TokenAmount(tokenIn, amountIn),
-//     TradeType.EXACT_INPUT
-//   );
+  const router = new AlphaRouter({
+    chainId: chainId,
+    provider: getProvider(),
+  });
 
-//   // Get the Uniswap V2 Router address
-//   const uniswapV2Router = '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D';
+  const options = {
+    recipient: recipientAddress,
+    slippageTolerance: new Percent(50, 10_000),
+    deadline: Math.floor(Date.now() / 1000 + 1800),
+    type: SwapType.SWAP_ROUTER_02,
+  };
 
-//   // Create the transaction parameters
-//   const slippageTolerance = new Percent('50', '10000'); // 0.5%
-//   const amountOutMin = trade.minimumAmountOut(slippageTolerance).raw;
-//   const path = [tokenIn.address, tokenOut.address];
-//   const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes from now
+  const route = await router.route(
+    CurrencyAmount.fromRawAmount(
+      tokenIn,
+      fromReadableAmount(
+        amountIn,
+        tokenIn.decimals
+      ).toString()
+    ),
+    tokenOut,
+    TradeType.EXACT_INPUT,
+    options
+  );
+  return route;
+}
 
-//   // Create the transaction
-//   const tx = await uniswapV2Router.swapExactTokensForTokens(
-//     amountIn.toString(),
-//     amountOutMin.toString(),
-//     path,
-//     walletAddress,
-//     deadline
-//   );
+async function executeRoute(chainId, route, walletAddress, tokenInAddress, tokenInDecimal, tokenInAmount) {
+  const provider = getProvider(chainId);
+  if (!walletAddress || !provider) {
+    throw new Error('Cannot execute a trade without a connected wallet');
+  }
 
-//   console.log('Transaction would be sent with these parameters:', tx);
-// }
+  const routerAddress = getSwapRouterAddress(chainId);
 
-// // Example usage
-// executeTokenSwap(
-// );
+  const tokenApproval = await checkAllowanceAndApprove(
+    walletAddress,
+    tokenInAddress,
+    routerAddress,
+    ethers.parseUnits(tokenInAmount, tokenInDecimal)
+  );
+
+  // Fail if transfer approvals do not go through
+  if (!tokenApproval) {
+    return "Failed";
+  }
+
+  const res = await sendTransaction({
+    data: route.methodParameters?.calldata,
+    to: routerAddress,
+    value: route?.methodParameters?.value,
+    from: walletAddress,
+    maxFeePerGas: MAX_FEE_PER_GAS,
+    maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS,
+  });
+  return res;
+}
+
+async function sendTransaction(
+  transaction,
+  chainId,
+  privateKey
+) {
+  const provider = getProvider(chainId)
+  if (!provider) {
+    return "Failed"
+  }
+
+  if (transaction.value) {
+    transaction.value = BigNumber.from(transaction.value)
+  }
+
+  const wallet = new ethers.Wallet(privateKey, provider);
+
+  const txRes = await wallet.sendTransaction(transaction)
+  let receipt = null
+
+  while (receipt === null) {
+    try {
+      receipt = await provider.getTransactionReceipt(txRes.hash)
+
+      if (receipt === null) {
+        continue
+      }
+    } catch (e) {
+      console.log(`Receipt error:`, e)
+      break
+    }
+  }
+
+  if (receipt) {
+    return "Success"
+  } else {
+    return "Failed"
+  }
+}
+
+module.exports = {
+  generateRoute,
+  executeRoute,
+  getTokenTransferApproval
+};
